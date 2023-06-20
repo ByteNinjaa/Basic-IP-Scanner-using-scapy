@@ -1,49 +1,76 @@
 from scapy.all import ARP, Ether, srp
 import threading
-import socket
+import requests
 
-def arp_scan(ip_range):
+def get_vendor(mac_address):
+    url = f"https://api.macvendors.com/{mac_address}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        return response.content.decode()
+    return "Unknown"
+
+def arp_scan(target_ip):
+    arp = ARP(pdst=target_ip)
+    ether = Ether(dst="ff:ff:ff:ff:ff:ff")
+    packet = ether / arp
+
+    result = srp(packet, timeout=3, verbose=0)[0]
+
     devices = []
-    lock = threading.Lock()
+    for sent, received in result:
+        vendor = get_vendor(received.hwsrc)
+        devices.append({
+            'ip': received.psrc,
+            'mac': received.hwsrc,
+            'vendor': vendor
+        })
 
-    def get_device_info(ip, mac):
-        try:
-            hostname = socket.gethostbyaddr(ip)[0]
-        except socket.herror:
-            hostname = 'N/A'
-        vendor = get_vendor(mac)
-        return hostname, vendor
+    return devices
 
-    def get_vendor(mac):
-        # Make an API call or use a local database to lookup the vendor based on MAC address
-        # Replace the implementation below with your own logic
-        return 'N/A'
+def arp_scan_threaded(ip_addresses):
+    devices = []
 
-    def scan(ip):
-        arp = ARP(pdst=ip)
-        ether = Ether(dst="ff:ff:ff:ff:ff:ff")
-        packet = ether / arp
-        result = srp(packet, timeout=1, verbose=0)[0]
-        for _, received in result:
-            with lock:
-                device_info = get_device_info(received.psrc, received.hwsrc)
-                devices.append({'ip': received.psrc, 'mac': received.hwsrc, 'hostname': device_info[0], 'vendor': device_info[1]})
+    for ip in ip_addresses:
+        result = arp_scan(ip)
+        devices.extend(result)
 
+    return devices
+
+def arp_scan_multi_threaded(ip_range, num_threads=16):
+    devices = []
+
+    # Generate the list of IP addresses to scan
+    ip_addresses = [f"192.168.1.{i}" for i in range(ip_range[0], ip_range[1] + 1)]
+
+    # Split the IP addresses into equal segments for each thread
+    segment_size = len(ip_addresses) // num_threads
+
+    # Create and start threads
     threads = []
-    for i in range(1, 193):
-        ip = f"192.168.1.{i}"
-        thread = threading.Thread(target=scan, args=(ip,))
+    for i in range(num_threads):
+        start = i * segment_size
+        end = (i + 1) * segment_size
+
+        # Adjust the end index for the last thread
+        if i == num_threads - 1:
+            end = len(ip_addresses)
+
+        thread = threading.Thread(target=lambda: devices.extend(arp_scan_threaded(ip_addresses[start:end])))
         threads.append(thread)
         thread.start()
 
+    # Wait for all threads to complete
     for thread in threads:
         thread.join()
 
-    # Print the discovered devices
-    print("IP\t\t\tMAC Address\t\t\tHostname\t\tVendor")
-    print("-----------------------------------------------------------")
-    for device in devices:
-        print(f"{device['ip']}\t{device['mac']}\t{device['hostname']}\t{device['vendor']}")
+    return devices
 
-# Example usage:
-arp_scan("192.168.1.0/24")
+# Perform the ARP scan for IP range 192.168.1.0 to 192.168.1.255
+ip_range = (0, 255)
+devices = arp_scan_multi_threaded(ip_range)
+
+# Print the discovered devices
+print("IP\t\t\tMAC Address\t\tVendor")
+print("-----------------------------------------")
+for device in devices:
+    print(f"{device['ip']}\t{device['mac']}\t{device['vendor']}")
